@@ -14,16 +14,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Твой API-ключ Google Gemini
-GEMINI_API_KEY = "AIzaSyDR1uG-0yPYdgec4I7xd4FBOVVRVCxbf3M"
-# Используем стабильную версию API v1
-GEMINI_URL = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+# ТВОЙ НОВЫЙ КЛЮЧ С OPENROUTER
+OPENROUTER_API_KEY = "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"
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 USER_LIMITS = {}
 WAITING_PLAYERS = {"ua": [], "en": [], "ru": []}
 
 async def ask_gemini_teenager(user_message: str, lang: str) -> str:
-    """Запрос к ИИ Gemini с правильной структурой системных инструкций"""
+    """Запрос к ИИ через OpenRouter (работает без региональных блокировок)"""
     
     system_instruction = (
         "Ты - реальный человек, подросток (16-19 лет), общаешься в анонимном чате. "
@@ -34,40 +33,38 @@ async def ask_gemini_teenager(user_message: str, lang: str) -> str:
         f"Язык общения строго: {lang}."
     )
 
-    # Правильный формат запроса по документации Google: разделяем системный промт и сообщение пользователя
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
     payload = {
-        "contents": [
-            {
-                "role": "user",
-                "parts": [{"text": user_message}]
-            }
+        # Используем абсолютно бесплатную и умную модель Google Gemini 1.5 Flash через мост
+        "model": "google/gemini-flash-1.5-8b:free", 
+        "messages": [
+            {"role": "system", "content": system_instruction},
+            {"role": "user", "content": user_message}
         ],
-        "systemInstruction": {
-            "parts": [{"text": system_instruction}]
-        },
-        "generationConfig": {
-            "temperature": 0.8,
-            "maxOutputTokens": 50
-        }
+        "temperature": 0.85,
+        "max_tokens": 40
     }
 
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.post(GEMINI_URL, json=payload, timeout=8.0)
+            response = await client.post(OPENROUTER_URL, json=payload, headers=headers, timeout=10.0)
             
-            # Если Google ругается, выведем ошибку в логи Render
             if response.status_code != 200:
-                print(f"Google API Error! Status: {response.status_code}, Response: {response.text}")
+                print(f"OpenRouter Error: {response.status_code}, {response.text}")
                 return "хз, чет связь лагает"
                 
             result = response.json()
-            reply = result['candidates'][0]['content']['parts'][0]['text']
+            reply = result['choices'][0]['message']['content']
             return reply.strip().lower()
             
     except Exception as e:
-        print(f"Ошибка отправки запроса: {e}")
+        print(f"Ошибка OpenRouter: {e}")
     
-    return "хz, чето лагануло"
+    return "хз, чето лагануло"
 
 async def simulate_ai_typing() -> None:
     await asyncio.sleep(random.randint(2, 3))
@@ -110,7 +107,6 @@ async def websocket_endpoint(websocket: WebSocket, lang: str, user_id: str):
             while True:
                 user_msg = await websocket.receive_text()
                 
-                # Сначала генерируем ответ от ИИ, а потом искусственно ждем (чтобы юзер не ждал лишнее время)
                 ai_reply = await ask_gemini_teenager(user_msg, lang)
                 await simulate_ai_typing()
                 
