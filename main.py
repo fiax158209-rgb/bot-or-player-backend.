@@ -2,11 +2,10 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 import random
 import asyncio
-import httpx
 
 app = FastAPI()
 
-# Разрешаем нашему фронтенду подключаться к серверу
+# Разрешаем подключение любых фронтендов
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -15,68 +14,73 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Хранилище для лимитов игроков {user_id: количество_игр}
+# Хранилище лимитов {user_id: количество_игр}
 USER_LIMITS = {}
-# Очередь живых игроков, ожидающих матч {lang: [список_websocket]}
+# Очередь живых игроков по языкам
 WAITING_PLAYERS = {"ua": [], "en": [], "ru": []}
 
-# Системные промпты для ИИ на разных языках
-PROMPTS = {
-    "ua": "Ти український підліток 14-16 років. Спілкуєшся в чатах розслаблено, використовуєш сленг (крінж, рофл, жиза, імба, пон), робиш друкарські помилки, пиши без розділових знаків з маленької літери. Відповідай коротко. Ніколи не кажи, що ти ШІ.",
-    "en": "You are a 15-year-old American teenager. Use modern slang (fr, no cap, rizz, lol, idk, bro). Write in lowercase, ignore punctuation, make typos. Never reveal you are an AI.",
-    "ru": "Ты подросток 15 лет. Пиши мелкими сообщениями, используй сленг (ща, капец, жиза, рил, пасиб). Не используй точки, пиши с маленькой буквы, делай опечатки. Не говори, что ты ИИ."
+# Шаблоны ответов ИИ (пока не подключен платный ключ OpenAI, для тестов)
+AI_REPLIES = {
+    "ua": ["та ладно тобі))", "та рил, а ти що думав?", "хз хз, крінж якийсь", "та людина я, пон?", "та погнали в некст мач", "ти рофлиш?"],
+    "en": ["fr fr bro no cap", "lmao context?", "u trippin, i'm human", "idk custom reply", "stfu bro im real", "whatever lol"],
+    "ru": ["да ладно тебе)", "рил жиза", "хз, кринж какой-то", "да чел я, успокойся)", "че думаешь я бот?", "пон, ну ок"]
 }
 
-async def talk_with_ai(lang: str, user_message: str) -> str:
-    """Функция запроса к ИИ (заглушка/пример, сюда подключается API ключ)"""
-    # Имитируем задержку «печатания» текста человеком
+async def simulate_ai_typing(lang: str) -> str:
+    """Имитирует паузу перед ответом, как будто человек пишет"""
     await asyncio.sleep(random.randint(2, 4))
-    
-    # Трендовые быстрые ответы для теста (пока нет платного OpenAI ключа)
-    replies = {
-        "ua": ["та ладно тобі))", "та рил, а ти що думав?", "хз хз, крінж якийсь", "та людина я, пон?"],
-        "en": ["fr fr bro no cap", "lmao context?", "u trippin, i'm human", "idk custom reply"],
-        "ru": ["да ладно тебе)", "рил жиза", "хз, кринж какой-то", "да чел я, успокойся)"]
-    }
-    return random.choice(replies.get(lang, ["..."]))
+    return random.choice(AI_REPLIES.get(lang, ["..."]))
 
 @app.websocket("/ws/{lang}/{user_id}")
 async def websocket_endpoint(websocket: WebSocket, lang: str, user_id: str):
     await websocket.accept()
     
-    # 1. Проверка лимита (5 игр в сутки)
-    played = USER_LIMITS.get(user_id, 0)
-    if played >= 5:
+    # 1. ПРОВЕРКА ЛИМИТА ИГР (Максимум 5)
+    played_games = USER_LIMITS.get(user_id, 0)
+    if played_games >= 5:
         await websocket.send_json({"type": "error", "message": "LIMIT_EXCEEDED"})
         await websocket.close()
         return
     
-    USER_LIMITS[user_id] = played + 1
+    # Засчитываем игру
+    USER_LIMITS[user_id] = played_games + 1
 
-    # 2. Логика подбора соперника (Рандом 50/50: закинет к человеку или к Боту)
-    if random.choice([True, False]) and WAITING_PLAYERS[lang]:
-        # Нашелся живой соперник! Связываем их
-        opponent = WAITING_PLAYERS[lang].pop(0)
+    # 2. ПОДБОР СОПЕРНИКА (50% шанс попасть на человека, если кто-то ждет)
+    if random.choice([True, False]) and WAITING_PLAYERS.get(lang):
+        opponent_ws = WAITING_PLAYERS[lang].pop(0)
         
+        # Запускаем чат между людьми
         await websocket.send_json({"type": "start", "opponent": "human"})
-        await opponent.send_json({"type": "start", "opponent": "human"})
+        await opponent_ws.send_json({"type": "start", "opponent": "human"})
         
-        # Пересылка сообщений между ними (мост)
         try:
             while True:
                 data = await websocket.receive_text()
-                await opponent.send_json({"type": "msg", "text": data})
+                await opponent_ws.send_json({"type": "msg", "text": data})
         except WebSocketDisconnect:
-            await opponent.send_json({"type": "opponent_left"})
+            try:
+                await opponent_ws.send_json({"type": "opponent_left"})
+            except:
+                pass
     else:
-        # Соперника нет или выпал Бот — подключаем ИИ
+        # ИГРА С ИИ
+        if lang not in WAITING_PLAYERS:
+            WAITING_PLAYERS[lang] = []
+            
+        # Если живого соперника нет, кидаем текущего юзера в ожидание, но параллельно запускаем ИИ режим
+        WAITING_PLAYERS[lang].append(websocket)
         await websocket.send_json({"type": "start", "opponent": "ai"})
         
         try:
+            # Убираем из очереди, так как мы уже играем с ботом
+            if websocket in WAITING_PLAYERS[lang]:
+                WAITING_PLAYERS[lang].remove(websocket)
+                
             while True:
                 user_msg = await websocket.receive_text()
-                # Получаем ответ от ИИ под нужный язык
-                ai_reply = await talk_with_ai(lang, user_msg)
+                # Генерируем ответ подростка-ИИ
+                ai_reply = await simulate_ai_typing(lang)
                 await websocket.send_json({"type": "msg", "text": ai_reply})
         except WebSocketDisconnect:
-            pass
+            if websocket in WAITING_PLAYERS[lang]:
+                WAITING_PLAYERS[lang].remove(websocket)
